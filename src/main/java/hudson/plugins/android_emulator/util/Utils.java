@@ -51,6 +51,8 @@ import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import jenkins.security.MasterToSlaveCallable;
+
 import static hudson.plugins.android_emulator.AndroidEmulator.log;
 
 public class Utils {
@@ -109,7 +111,7 @@ public class Utils {
             final EnvVars envVars, final String androidHome) {
         final String autoInstallDir = getSdkInstallDirectory(node).getRemote();
 
-        Callable<String, InterruptedException> task = new Callable<String, InterruptedException>() {
+        Callable<String, InterruptedException> task = new MasterToSlaveCallable<String, InterruptedException>() {
             public String call() throws InterruptedException {
                 // Verify existence of provided value
                 if (validateHomeDir(androidHome)) {
@@ -172,7 +174,7 @@ public class Utils {
     public static AndroidSdk getAndroidSdk(Launcher launcher, final String androidSdkRoot, final String androidSdkHome) {
         final boolean isUnix = launcher.isUnix();
 
-        Callable<AndroidSdk, IOException> task = new Callable<AndroidSdk, IOException>() {
+        Callable<AndroidSdk, IOException> task = new MasterToSlaveCallable<AndroidSdk, IOException>() {
             public AndroidSdk call() throws IOException {
                 String sdkRoot = androidSdkRoot;
                 if (androidSdkRoot == null) {
@@ -292,6 +294,37 @@ public class Utils {
         }
 
         return new File(homeDirPath);
+    }
+
+    /**
+     * Locates the current user's home directory using the same scheme as the Android SDK does.
+     *
+     * @return A {@link File} representing the home directory.
+     */
+    public static File getHomeDirectory() {
+        // From https://android.googlesource.com/platform/external/qemu/android/base/system/System.cpp
+        String path = null;
+        if (Functions.isWindows()) {
+            // The emulator queries for the Win32 "CSIDL_PROFILE" path, which should equal USERPROFILE
+            path = System.getenv("USERPROFILE");
+
+            // Otherwise, fall back to the Windows equivalent of HOME
+            if (path == null) {
+                String homeDrive = System.getenv("HOMEDRIVE");
+                String homePath = System.getenv("HOMEPATH");
+                if (homeDrive != null && homePath != null) {
+                    path = homeDrive + homePath;
+                }
+            }
+        } else {
+            path = System.getenv("HOME");
+        }
+
+        // Path may not have been discovered
+        if (path == null) {
+            return null;
+        }
+        return new File(path);
     }
 
     /**
@@ -716,7 +749,7 @@ public class Utils {
     }
 
     /** Task that will execute a command on the given emulator's console port, then quit. */
-    private static final class EmulatorCommandTask implements Callable<Boolean, IOException> {
+    private static final class EmulatorCommandTask extends MasterToSlaveCallable<Boolean, IOException> {
 
         private final int port;
         private final String command;

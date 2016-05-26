@@ -25,6 +25,7 @@ import java.io.PushbackInputStream;
 import java.io.Serializable;
 import java.util.Map;
 import java.util.regex.Pattern;
+import jenkins.security.MasterToSlaveCallable;
 
 class EmulatorConfig implements Serializable {
 
@@ -248,6 +249,15 @@ class EmulatorConfig implements Serializable {
     }
 
     /**
+     * Gets a task that writes an empty emulator auth file to the machine where the AVD will run.
+     *
+     * @return A Callable that will write an empty auth file.
+     */
+    public Callable<Void, IOException> getEmulatorAuthFileTask() {
+        return new EmulatorAuthFileTask();
+    }
+
+    /**
      * Gets a task that deletes the AVD corresponding to this instance's configuration.
      *
      *
@@ -298,22 +308,59 @@ class EmulatorConfig implements Serializable {
     }
 
     /**
+     * Sets or overwrites a key-value pair in the AVD config file.
+     *
+     * @param homeDir AVD home directory.
+     * @param key Key to set.
+     * @param value Value to set.
+     * @throws EmulatorCreationException If reading or writing the file failed.
+     */
+    private void setAvdConfigValue(File homeDir, String key, String value)
+            throws EmulatorCreationException {
+        Map<String, String> configValues;
+        try {
+            configValues = parseAvdConfigFile(homeDir);
+            configValues.put(key, value);
+            writeAvdConfigFile(homeDir, configValues);
+        } catch (IOException e) {
+            throw new EmulatorCreationException(Messages.AVD_CONFIG_NOT_READABLE(), e);
+        }
+    }
+
+    /**
      * Gets the command line arguments to pass to "emulator" based on this instance.
      *
      * @return A string of command line arguments.
      */
     public String getCommandArguments(SnapshotState snapshotState, boolean sdkSupportsSnapshots,
-            int userPort, int adbPort) {
+            boolean emulatorSupportsEngineFlag, int userPort, int adbPort, int callbackPort,
+            int consoleTimeout) {
         StringBuilder sb = new StringBuilder();
 
-        // Set basics
+        // Stick to using the original version of the emulator for now, as otherwise we can't use
+        // the "-ports" command line flag, which we need to stay outside of the regular port range,
+        // nor can we use the "-prop" or "-report-console" command line flags that we require.
+        //
+        // See Android bugs 202762, 202853, 205202 and 205204
+        if (emulatorSupportsEngineFlag) {
+            sb.append(" -engine classic");
+        }
+
+        // Tell the emulator to use certain ports
         sb.append(String.format(" -ports %s,%s", userPort, adbPort));
+
+        // Ask the emulator to report to us on the given port, once initial startup is complete
+        sb.append(String.format(" -report-console tcp:%s,max=%s", callbackPort, consoleTimeout));
+
+        // Set the locale to be used at startup
         if (!isNamedEmulator()) {
             sb.append(" -prop persist.sys.language=");
             sb.append(getDeviceLanguage());
             sb.append(" -prop persist.sys.country=");
             sb.append(getDeviceCountry());
         }
+
+        // Set the ID of the AVD we want to start
         sb.append(" -avd ");
         sb.append(getAvdName());
 
@@ -370,7 +417,7 @@ class EmulatorConfig implements Serializable {
      * {@code FALSE} if an AVD was newly created, and throws an AndroidEmulatorException if the
      * given AVD or parts required to generate a new AVD were not found.
      */
-    private final class EmulatorCreationTask implements Callable<Boolean, AndroidEmulatorException> {
+    private final class EmulatorCreationTask extends MasterToSlaveCallable<Boolean, AndroidEmulatorException> {
 
         private static final long serialVersionUID = 1L;
         private final AndroidSdk androidSdk;
@@ -447,14 +494,7 @@ class EmulatorConfig implements Serializable {
                 Util.copyFile(new File(snapshotDir, "snapshots.img"), snapshotsFile);
 
                 // Update the AVD config file mark snapshots as enabled
-                Map<String, String> configValues;
-                try {
-                    configValues = parseAvdConfigFile(homeDir);
-                    configValues.put("snapshot.present", "true");
-                    writeAvdConfigFile(homeDir, configValues);
-                } catch (IOException e) {
-                    throw new EmulatorCreationException(Messages.AVD_CONFIG_NOT_READABLE(), e);
-                }
+                setAvdConfigValue(homeDir, "snapshot.present", "true");
             }
 
             // If we need create an SD card for an existing emulator, do so
@@ -465,14 +505,7 @@ class EmulatorConfig implements Serializable {
                 }
 
                 // Update the AVD config file
-                Map<String, String> configValues;
-                try {
-                    configValues = parseAvdConfigFile(homeDir);
-                    configValues.put("sdcard.size", sdCardSize);
-                    writeAvdConfigFile(homeDir, configValues);
-                } catch (IOException e) {
-                    throw new EmulatorCreationException(Messages.AVD_CONFIG_NOT_READABLE(), e);
-                }
+                setAvdConfigValue(homeDir, "sdcard.size", sdCardSize);
             }
 
             // Return if everything is now ready for use
@@ -602,6 +635,9 @@ class EmulatorConfig implements Serializable {
                 errOutput = null;
             }
 
+            // Set the screen density
+            setAvdConfigValue(homeDir, "hw.lcd.density", String.valueOf(getScreenDensity().getDpi()));
+
             // Check everything went ok
             if (!avdCreated) {
                 if (errOutput != null && errOutput.length() != 0) {
@@ -642,7 +678,7 @@ class EmulatorConfig implements Serializable {
      *
      * Throws an IOException if the AVD's config could not be read or written.
      */
-    private final class EmulatorConfigTask implements Callable<Void, IOException> {
+    private final class EmulatorConfigTask extends MasterToSlaveCallable<Void, IOException> {
 
         private static final long serialVersionUID = 1L;
 
@@ -680,8 +716,32 @@ class EmulatorConfig implements Serializable {
         }
     }
 
+    /** Writes an empty emulator auth file. */
+    private final class EmulatorAuthFileTask extends MasterToSlaveCallable<Void, IOException> {
+
+        private static final long serialVersionUID = 1L;
+
+        public Void call() throws IOException {
+            // Create an empty auth file to prevent the emulator telnet interface from requiring authentication
+            final File userHome = Utils.getHomeDirectory();
+            if (userHome != null) {
+                try {
+                    FilePath authFile = new FilePath(userHome).child(".emulator_console_auth_token");
+                    authFile.write("", "UTF-8");
+                } catch (IOException e) {
+                    throw new IOException(String.format("Failed to write auth file to %s.", userHome, e));
+                } catch (InterruptedException e) {
+                    throw new IOException(String.format("Interrupted while writing auth file to %s.", userHome, e));
+                }
+            }
+
+            return null;
+        }
+
+    }
+
     /** A task that deletes the AVD corresponding to our local state. */
-    private final class EmulatorDeletionTask implements Callable<Boolean, Exception> {
+    private final class EmulatorDeletionTask extends MasterToSlaveCallable<Boolean, Exception> {
 
         private static final long serialVersionUID = 1L;
 

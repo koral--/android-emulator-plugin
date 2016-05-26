@@ -1,5 +1,7 @@
 package hudson.plugins.android_emulator;
 
+import org.jvnet.hudson.plugins.port_allocator.PortAllocationManager;
+
 import java.io.IOException;
 import java.io.PrintStream;
 
@@ -7,24 +9,21 @@ import hudson.EnvVars;
 import hudson.Launcher;
 import hudson.Launcher.ProcStarter;
 import hudson.Proc;
-import hudson.model.BuildListener;
 import hudson.model.AbstractBuild;
+import hudson.model.BuildListener;
 import hudson.model.Computer;
 import hudson.model.TaskListener;
-import hudson.util.ArgumentListBuilder;
-import hudson.util.NullStream;
-
-import org.jvnet.hudson.plugins.port_allocator.PortAllocationManager;
-
 import hudson.plugins.android_emulator.sdk.AndroidSdk;
 import hudson.plugins.android_emulator.sdk.Tool;
 import hudson.plugins.android_emulator.util.Utils;
+import hudson.util.ArgumentListBuilder;
+import hudson.util.NullStream;
 
 public class AndroidEmulatorContext {
     /** Interval during which an emulator command should complete. */
     public static final int EMULATOR_COMMAND_TIMEOUT_MS = 60 * 1000;
 
-	private int adbPort, userPort, adbServerPort;
+	private int adbPort, userPort, adbServerPort, emulatorCallbackPort;
 	private String serial;
 
 	private PortAllocationManager portAllocator;
@@ -44,26 +43,59 @@ public class AndroidEmulatorContext {
 		launcher = launcher_;
 		sdk = sdk_;
 
-		final Computer computer = Computer.currentComputer();
+        // Use the Port Allocator plugin to reserve the ports we need
+        final Computer computer = Computer.currentComputer();
+        portAllocator = PortAllocationManager.getManager(computer);
 
-		// Use the Port Allocator plugin to reserve the ports we need
-		portAllocator = PortAllocationManager.getManager(computer);
-		final int PORT_RANGE_START = 5554;
-		final int PORT_RANGE_END = 9999; // Make sure the port is four digits, as there are tools that rely on this
-		int[] ports = portAllocator.allocatePortRange(build, PORT_RANGE_START, PORT_RANGE_END, 3, true);
-		userPort = ports[0];
-		adbPort = ports[1];
-		adbServerPort = ports[2];
+        // ADB allows up to 64 local devices, each of which uses two consecutive ports: one for the
+        // user telnet interface, and one to communicate with ADB.  These pairs start at port 5554.
+        // http://android.googlesource.com/platform/system/core/+/d387acc/adb/adb.h#206
+        // http://android.googlesource.com/platform/system/core/+/d387acc/adb/transport_local.cpp#44
+        //
+        // So long as the ADB server automatically registers itself with any emulators in the
+        // standard port range of 5555–5861, then we should avoid using that port range.
+        // Otherwise, when we run multiple ADB servers and emulators at the same time, each of the
+        // ADB servers will race to register with each emulator, meaning that each build will most
+        // likely end up with an emulator that always ends up appearing to be "offline".
+        // See http://b.android.com/205197
+        final int PORT_RANGE_START = 5554 + (2 * 64);
+        final int PORT_RANGE_END = PORT_RANGE_START + (2 * 64);
 
-		serial = String.format("localhost:%d", adbPort);
-	}
+        // When using the emulator `-port` option, the first port must be even, so here we reserve
+        // three consecutive ports, ensuring that we will get an even port followed by an odd
+        int[] ports = portAllocator.allocatePortRange(build, PORT_RANGE_START, PORT_RANGE_END, 3, true);
 
-	public void cleanUp() {
-		// Free up the TCP ports
-		portAllocator.free(adbPort);
-		portAllocator.free(userPort);
-		portAllocator.free(adbServerPort);
-	}
+        // Assign the ports the user and ADB interfaces should use, such that the user port is even
+        int i = 0;
+        if (ports[i] % 2 != 0) {
+            i++;
+        }
+        userPort = ports[i++];
+        adbPort = ports[i++];
+
+        // Release the port that was reserved but not used
+        portAllocator.free(i == 2 ? ports[2] : ports[0]);
+
+        // Reserve two further ports for the ADB server and the callback socket.
+        // Use a separate port range so as not to tie up emulator ports unnecessarily
+        final int SERVER_PORT_RANGE_START = PORT_RANGE_END;
+        final int SERVER_PORT_RANGE_END = SERVER_PORT_RANGE_START + 64;
+        ports = portAllocator.allocatePortRange(build, SERVER_PORT_RANGE_START,
+                SERVER_PORT_RANGE_END, 2, false);
+        adbServerPort = ports[0];
+        emulatorCallbackPort = ports[1];
+
+        // Set the emulator qualifier based on the telnet port
+        serial = String.format("emulator-%d", userPort);
+    }
+
+    public void cleanUp() {
+        // Free up the TCP ports that we reserved
+        portAllocator.free(adbPort);
+        portAllocator.free(userPort);
+        portAllocator.free(adbServerPort);
+        portAllocator.free(emulatorCallbackPort);
+    }
 
 	public int adbPort() {
 		return adbPort;
@@ -74,6 +106,8 @@ public class AndroidEmulatorContext {
 	public int adbServerPort() {
 		return adbServerPort;
 	}
+    public int getEmulatorCallbackPort() { return emulatorCallbackPort; }
+
 	public String serial() {
 		return serial;
 	}

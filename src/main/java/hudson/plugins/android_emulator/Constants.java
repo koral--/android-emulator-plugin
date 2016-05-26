@@ -81,9 +81,10 @@ class AndroidPlatform implements Serializable {
     static final AndroidPlatform SDK_4_4W = new AndroidPlatform("4.4W", 20);
     static final AndroidPlatform SDK_5_0 = new AndroidPlatform("5.0", 21);
     static final AndroidPlatform SDK_5_1 = new AndroidPlatform("5.1", 22);
+    static final AndroidPlatform SDK_6_0 = new AndroidPlatform("6.0", 23);
     static final AndroidPlatform[] ALL = new AndroidPlatform[] { SDK_1_1, SDK_1_5, SDK_1_6, SDK_2_0,
         SDK_2_0_1, SDK_2_1, SDK_2_2, SDK_2_3, SDK_2_3_3, SDK_3_0, SDK_3_1, SDK_3_2, SDK_4_0,
-        SDK_4_0_3, SDK_4_1, SDK_4_2, SDK_4_3, SDK_4_4, SDK_4_4W, SDK_5_0, SDK_5_1 };
+        SDK_4_0_3, SDK_4_1, SDK_4_2, SDK_4_3, SDK_4_4, SDK_4_4W, SDK_5_0, SDK_5_1, SDK_6_0 };
 
     private final String name;
     private final int level;
@@ -162,10 +163,14 @@ class ScreenDensity implements Serializable {
     static final ScreenDensity TV_720P = new ScreenDensity(213, "tvdpi");
     static final ScreenDensity HIGH = new ScreenDensity(240, "hdpi");
     static final ScreenDensity EXTRA_HIGH = new ScreenDensity(320, "xhdpi");
+    static final ScreenDensity EXTRA_HIGH_400 = new ScreenDensity(400);
+    static final ScreenDensity EXTRA_HIGH_420 = new ScreenDensity(420);
     static final ScreenDensity EXTRA_EXTRA_HIGH = new ScreenDensity(480, "xxhdpi");
+    static final ScreenDensity EXTRA_EXTRA_HIGH_560 = new ScreenDensity(560);
     static final ScreenDensity EXTRA_EXTRA_EXTRA_HIGH = new ScreenDensity(640, "xxxhdpi");
     static final ScreenDensity[] PRESETS = new ScreenDensity[] { LOW, MEDIUM, TV_720P, HIGH,
-                                                                 EXTRA_HIGH, EXTRA_EXTRA_HIGH, EXTRA_EXTRA_EXTRA_HIGH };
+            EXTRA_HIGH, EXTRA_HIGH_400, EXTRA_HIGH_420, EXTRA_EXTRA_HIGH, EXTRA_EXTRA_HIGH_560,
+            EXTRA_EXTRA_EXTRA_HIGH };
 
     private final int dpi;
     private final String alias;
@@ -175,8 +180,8 @@ class ScreenDensity implements Serializable {
         this.alias = alias;
     }
 
-    private ScreenDensity(String density) {
-        this(Integer.parseInt(density), null);
+    private ScreenDensity(int density) {
+        this(density, null);
     }
 
     public static ScreenDensity valueOf(String density) {
@@ -194,11 +199,11 @@ class ScreenDensity implements Serializable {
 
         // Return custom value, if things look valid
         try {
-            Integer.parseInt(density);
+            int dpi = Integer.parseInt(density);
+            return new ScreenDensity(dpi);
         } catch (NumberFormatException ex) {
             return null;
         }
-        return new ScreenDensity(density);
     }
 
     public boolean isCustomDensity() {
